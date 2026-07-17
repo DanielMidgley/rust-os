@@ -110,11 +110,60 @@ impl Writer {
             }
         }
     }
+
+    /// Erases the character to the left of the cursor on the current line.
+    ///
+    /// Does nothing at the start of a line (we don't wrap back to the
+    /// previous row, which keeps line editing simple and predictable).
+    pub fn backspace(&mut self) {
+        if self.column_position > 0 {
+            self.column_position -= 1;
+            let row = BUFFER_HEIGHT - 1;
+            let col = self.column_position;
+            let color_code = self.color_code;
+            self.buffer.chars[row][col].write(ScreenChar {
+                ascii_character: b' ',
+                color_code,
+            });
+            self.update_cursor();
+        }
+    }
+
+    /// Clears the whole screen and returns the cursor to the top-left.
+    pub fn clear_screen(&mut self) {
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row);
+        }
+        self.column_position = 0;
+        self.update_cursor();
+    }
+
+    /// Moves the VGA hardware cursor to the current write position.
+    ///
+    /// Output always lands on the bottom row, so the linear cursor position
+    /// is `(BUFFER_HEIGHT - 1) * BUFFER_WIDTH + column_position`. It's written
+    /// as two bytes to CRTC registers 0x0E (high) and 0x0F (low) via the
+    /// index/data ports (0x3D4/0x3D5).
+    fn update_cursor(&self) {
+        use x86_64::instructions::port::Port;
+
+        let row = BUFFER_HEIGHT - 1;
+        let pos = (row * BUFFER_WIDTH + self.column_position) as u16;
+        unsafe {
+            let mut index: Port<u8> = Port::new(0x3D4);
+            let mut data: Port<u8> = Port::new(0x3D5);
+            index.write(0x0F);
+            data.write((pos & 0xFF) as u8);
+            index.write(0x0E);
+            data.write((pos >> 8) as u8);
+        }
+    }
 }
 
 impl fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.write_string(s);
+        self.update_cursor();
         Ok(())
     }
 }
@@ -148,6 +197,48 @@ pub fn _print(args: fmt::Arguments) {
 
     interrupts::without_interrupts(|| {     // new
         WRITER.lock().write_fmt(args).unwrap();
+    });
+}
+
+/// Enables the blinking VGA hardware cursor as an underline near the bottom
+/// of the character cell.
+///
+/// The "Cursor Start" register (index 0x0A) holds the disable bit (5) and the
+/// start scanline; "Cursor End" (index 0x0B) holds the end scanline. We clear
+/// the disable bit and set scanlines 14..15 for an underscore-style cursor.
+/// Registers are accessed via the CRTC index/data ports (0x3D4/0x3D5).
+pub fn enable_cursor() {
+    use x86_64::instructions::port::Port;
+
+    unsafe {
+        let mut index: Port<u8> = Port::new(0x3D4);
+        let mut data: Port<u8> = Port::new(0x3D5);
+        // Cursor start: preserve top 2 bits, clear disable bit, start = 14.
+        index.write(0x0A);
+        let start = data.read() & 0xC0;
+        data.write(start | 14);
+        // Cursor end: preserve top 3 bits, end = 15.
+        index.write(0x0B);
+        let end = data.read() & 0xE0;
+        data.write(end | 15);
+    }
+}
+
+/// Erases the character to the left of the cursor via the global WRITER.
+pub fn backspace() {
+    use x86_64::instructions::interrupts;
+
+    interrupts::without_interrupts(|| {
+        WRITER.lock().backspace();
+    });
+}
+
+/// Clears the screen via the global WRITER.
+pub fn clear_screen() {
+    use x86_64::instructions::interrupts;
+
+    interrupts::without_interrupts(|| {
+        WRITER.lock().clear_screen();
     });
 }
 

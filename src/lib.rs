@@ -18,6 +18,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 pub fn init() {
+    vga_buffer::enable_cursor();
     gdt::init();
     interrupts::init_idt();
     unsafe { interrupts::PICS.lock().initialize() };
