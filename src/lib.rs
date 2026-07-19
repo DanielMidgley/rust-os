@@ -19,6 +19,10 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
+#[cfg(test)]
+use bootloader::{entry_point, BootInfo};
+use x86_64::instructions::port::Port;
+
 pub fn init() {
     vga_buffer::enable_cursor();
     gdt::init();
@@ -57,8 +61,6 @@ pub enum QemuExitCode {
 }
 
 pub fn exit_qemu(exit_code: QemuExitCode) {
-    use x86_64::instructions::port::Port;
-
     unsafe {
         let mut port = Port::new(0xf4);
         port.write(exit_code as u32);
@@ -79,9 +81,6 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
     exit_qemu(QemuExitCode::Failed);
     hlt_loop();
 }
-
-#[cfg(test)]
-use bootloader::{entry_point, BootInfo};
 
 #[cfg(test)]
 entry_point!(test_kernel_main);

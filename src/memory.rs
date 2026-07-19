@@ -1,10 +1,10 @@
-use x86_64::{ structures::paging::PageTable, VirtAddr, PhysAddr, };
-use x86_64::structures::paging::OffsetPageTable;
-use x86_64::{
-    structures::paging::{Page, PhysFrame, Mapper, Size4KiB, FrameAllocator}
+use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::page_table::FrameError;
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
 };
-use bootloader::bootinfo::MemoryMap;
-use bootloader::bootinfo::MemoryRegionType;
+use x86_64::{PhysAddr, VirtAddr};
 
 /// Initialize a new OffsetPageTable.
 ///
@@ -68,10 +68,8 @@ pub fn create_example_mapping(
     mapper: &mut OffsetPageTable,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) {
-    use x86_64::structures::paging::PageTableFlags as Flags;
-
     let frame = PhysFrame::containing_address(PhysAddr::new(0xb8000));
-    let flags = Flags::PRESENT | Flags::WRITABLE;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
 
     let map_to_result = unsafe {
         // FIXME: this is not safe, we do it only for testing
@@ -99,8 +97,6 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
 unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
     -> &'static mut PageTable
 {
-    use x86_64::registers::control::Cr3;
-
     let (level_4_table_frame, _) = Cr3::read();
 
     let phys = level_4_table_frame.start_address();
@@ -130,9 +126,6 @@ pub unsafe fn translate_addr(addr: VirtAddr, physical_memory_offset: VirtAddr)
 fn translate_addr_inner(addr: VirtAddr, physical_memory_offset: VirtAddr)
     -> Option<PhysAddr>
 {
-    use x86_64::structures::paging::page_table::FrameError;
-    use x86_64::registers::control::Cr3;
-
     // read the active level 4 frame from the CR3 register
     let (level_4_table_frame, _) = Cr3::read();
 

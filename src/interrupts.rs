@@ -1,11 +1,10 @@
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
-use crate::println;
-use crate::gdt;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
-use spin;
-use x86_64::structures::idt::PageFaultErrorCode;
-use crate::hlt_loop;
+use x86_64::instructions::port::Port;
+use x86_64::registers::control::Cr2;
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+
+use crate::{gdt, hlt_loop, println, time};
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -61,7 +60,7 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    crate::time::tick();
+    time::tick();
 
     unsafe {
         PICS.lock()
@@ -72,8 +71,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 extern "x86-interrupt" fn keyboard_interrupt_handler(
     _stack_frame: InterruptStackFrame
 ) {
-    use x86_64::instructions::port::Port;
-
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
     crate::task::keyboard::add_scancode(scancode); // new
@@ -88,8 +85,6 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    use x86_64::registers::control::Cr2;
-
     println!("EXCEPTION: PAGE FAULT");
     println!("Accessed Address: {:?}", Cr2::read());
     println!("Error Code: {:?}", error_code);

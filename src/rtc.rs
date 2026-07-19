@@ -12,6 +12,7 @@
 //!   status register B. Both are handled below.
 
 use core::fmt;
+
 use x86_64::instructions::interrupts;
 use x86_64::instructions::port::Port;
 

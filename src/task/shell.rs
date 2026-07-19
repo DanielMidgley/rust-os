@@ -1,8 +1,10 @@
-use crate::task::keyboard::ScancodeStream;
-use crate::{print, println, rtc, time, vga_buffer};
 use alloc::string::String;
+
 use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+
+use crate::task::keyboard::ScancodeStream;
+use crate::{print, println, rtc, time, vga_buffer};
 
 const PROMPT: &str = "> ";
 

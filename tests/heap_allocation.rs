@@ -6,19 +6,18 @@
 
 extern crate alloc;
 
-use bootloader::{entry_point, BootInfo};
-use core::panic::PanicInfo;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use rust_os::allocator::HEAP_SIZE;
+use core::panic::PanicInfo;
+
+use bootloader::{entry_point, BootInfo};
+use rust_os::allocator::{self, HEAP_SIZE};
+use rust_os::memory::{self, BootInfoFrameAllocator};
+use x86_64::VirtAddr;
 
 entry_point!(main);
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    use rust_os::allocator;
-    use rust_os::memory::{self, BootInfoFrameAllocator};
-    use x86_64::VirtAddr;
-
     rust_os::init();
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };

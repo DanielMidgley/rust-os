@@ -3,8 +3,9 @@
 #![feature(abi_x86_interrupt)]
 
 use core::panic::PanicInfo;
-use rust_os::{exit_qemu, QemuExitCode, serial_println, serial_print};
+
 use lazy_static::lazy_static;
+use rust_os::{exit_qemu, serial_print, serial_println, QemuExitCode};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 #[unsafe(no_mangle)]
@@ -50,4 +51,9 @@ extern "x86-interrupt" fn test_double_fault_handler(
 
 pub fn init_test_idt() {
     TEST_IDT.load();
+}
+
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    rust_os::test_panic_handler(info)
 }

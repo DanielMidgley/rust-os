@@ -1,7 +1,10 @@
-use volatile::Volatile;
-use core::fmt;
+use core::fmt::{self, Write};
+
 use lazy_static::lazy_static;
 use spin::Mutex;
+use volatile::Volatile;
+use x86_64::instructions::interrupts;
+use x86_64::instructions::port::Port;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,8 +148,6 @@ impl Writer {
     /// as two bytes to CRTC registers 0x0E (high) and 0x0F (low) via the
     /// index/data ports (0x3D4/0x3D5).
     fn update_cursor(&self) {
-        use x86_64::instructions::port::Port;
-
         let row = BUFFER_HEIGHT - 1;
         let pos = (row * BUFFER_WIDTH + self.column_position) as u16;
         unsafe {
@@ -192,10 +193,7 @@ macro_rules! println {
 /// through the global WRITER instance
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
-    use x86_64::instructions::interrupts;   // new
-
-    interrupts::without_interrupts(|| {     // new
+    interrupts::without_interrupts(|| {
         WRITER.lock().write_fmt(args).unwrap();
     });
 }
@@ -208,8 +206,6 @@ pub fn _print(args: fmt::Arguments) {
 /// the disable bit and set scanlines 14..15 for an underscore-style cursor.
 /// Registers are accessed via the CRTC index/data ports (0x3D4/0x3D5).
 pub fn enable_cursor() {
-    use x86_64::instructions::port::Port;
-
     unsafe {
         let mut index: Port<u8> = Port::new(0x3D4);
         let mut data: Port<u8> = Port::new(0x3D5);
@@ -226,8 +222,6 @@ pub fn enable_cursor() {
 
 /// Erases the character to the left of the cursor via the global WRITER.
 pub fn backspace() {
-    use x86_64::instructions::interrupts;
-
     interrupts::without_interrupts(|| {
         WRITER.lock().backspace();
     });
@@ -235,8 +229,6 @@ pub fn backspace() {
 
 /// Clears the screen via the global WRITER.
 pub fn clear_screen() {
-    use x86_64::instructions::interrupts;
-
     interrupts::without_interrupts(|| {
         WRITER.lock().clear_screen();
     });
@@ -263,9 +255,6 @@ fn test_println_many() {
 
 #[test_case]
 fn test_println_output() {
-    use core::fmt::Write;
-    use x86_64::instructions::interrupts;
-
     let s = "Some test string that fits on a single line";
     interrupts::without_interrupts(|| {
         let mut writer = WRITER.lock();
