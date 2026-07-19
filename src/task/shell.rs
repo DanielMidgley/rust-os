@@ -1,5 +1,5 @@
 use crate::task::keyboard::ScancodeStream;
-use crate::{print, println, time, vga_buffer};
+use crate::{print, println, rtc, time, vga_buffer};
 use alloc::string::String;
 use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
@@ -69,6 +69,7 @@ async fn execute(line: &str) {
             println!("  help          show this message");
             println!("  clear         clear the screen");
             println!("  echo <text>   print <text> back");
+            println!("  date          show the current date and time (UTC)");
             println!("  uptime        show time since boot");
             println!("  sleep <ms>    pause for <ms> milliseconds");
             println!("  about         show kernel info");
@@ -79,6 +80,7 @@ async fn execute(line: &str) {
             let arg = line.splitn(2, char::is_whitespace).nth(1).unwrap_or("");
             println!("{}", arg.trim_start());
         }
+        "date" => println!("{} UTC", rtc::read()),
         "uptime" => {
             let ms = time::uptime_ms();
             println!("up {}.{:03} s", ms / 1000, ms % 1000);

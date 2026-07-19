@@ -13,6 +13,7 @@ pub mod memory;
 pub mod allocator;
 pub mod task;
 pub mod time;
+pub mod rtc;
 
 extern crate alloc;
 
