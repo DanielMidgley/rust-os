@@ -12,6 +12,7 @@ pub mod gdt;
 pub mod memory;
 pub mod allocator;
 pub mod task;
+pub mod time;
 
 extern crate alloc;
 
@@ -22,6 +23,7 @@ pub fn init() {
     gdt::init();
     interrupts::init_idt();
     unsafe { interrupts::PICS.lock().initialize() };
+    time::init(); // program the PIT before enabling interrupts
     x86_64::instructions::interrupts::enable();
 }
 

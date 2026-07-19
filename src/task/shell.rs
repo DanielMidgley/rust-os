@@ -1,5 +1,5 @@
 use crate::task::keyboard::ScancodeStream;
-use crate::{print, println, vga_buffer};
+use crate::{print, println, time, vga_buffer};
 use alloc::string::String;
 use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
@@ -30,42 +30,34 @@ pub async fn run_shell() {
 
     while let Some(scancode) = scancodes.next().await {
         if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-            if let Some(key) = keyboard.process_keyevent(key_event) {
-                match key {
-                    DecodedKey::Unicode(character) => handle_char(&mut line, character),
-                    DecodedKey::RawKey(_) => {} // arrows etc. ignored for now
+            if let Some(DecodedKey::Unicode(character)) = keyboard.process_keyevent(key_event) {
+                match character {
+                    '\n' => {
+                        println!();
+                        execute(line.trim()).await;
+                        line.clear();
+                        print!("{}", PROMPT);
+                    }
+                    // Backspace (0x08) or Delete (0x7f): remove the last char.
+                    '\u{8}' | '\u{7f}' => {
+                        if line.pop().is_some() {
+                            vga_buffer::backspace();
+                        }
+                    }
+                    // Ignore other control chars; echo everything printable.
+                    c if !c.is_control() => {
+                        line.push(c);
+                        print!("{}", c);
+                    }
+                    _ => {}
                 }
             }
         }
     }
 }
 
-/// Feeds a single decoded character into the line buffer, echoing to screen.
-fn handle_char(line: &mut String, c: char) {
-    match c {
-        '\n' => {
-            println!();
-            run_command(line.trim());
-            line.clear();
-            print!("{}", PROMPT);
-        }
-        // Backspace (0x08) or Delete (0x7f): remove the last char if any.
-        '\u{8}' | '\u{7f}' => {
-            if line.pop().is_some() {
-                vga_buffer::backspace();
-            }
-        }
-        // Ignore other control characters; echo everything printable.
-        c if !c.is_control() => {
-            line.push(c);
-            print!("{}", c);
-        }
-        _ => {}
-    }
-}
-
 /// Parses and executes a completed command line.
-fn run_command(line: &str) {
+async fn execute(line: &str) {
     let command = match line.split_whitespace().next() {
         Some(cmd) => cmd,
         None => return, // empty line
@@ -77,6 +69,8 @@ fn run_command(line: &str) {
             println!("  help          show this message");
             println!("  clear         clear the screen");
             println!("  echo <text>   print <text> back");
+            println!("  uptime        show time since boot");
+            println!("  sleep <ms>    pause for <ms> milliseconds");
             println!("  about         show kernel info");
         }
         "clear" => vga_buffer::clear_screen(),
@@ -84,6 +78,24 @@ fn run_command(line: &str) {
             // Everything after the first whitespace-delimited token.
             let arg = line.splitn(2, char::is_whitespace).nth(1).unwrap_or("");
             println!("{}", arg.trim_start());
+        }
+        "uptime" => {
+            let ms = time::uptime_ms();
+            println!("up {}.{:03} s", ms / 1000, ms % 1000);
+        }
+        "sleep" => {
+            let arg = line
+                .splitn(2, char::is_whitespace)
+                .nth(1)
+                .unwrap_or("")
+                .trim();
+            match arg.parse::<u64>() {
+                Ok(ms) => {
+                    time::sleep(ms).await;
+                    println!("slept {} ms", ms);
+                }
+                Err(_) => println!("usage: sleep <milliseconds>"),
+            }
         }
         "about" => {
             println!(
