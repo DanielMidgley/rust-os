@@ -200,7 +200,7 @@ Planned work, roughly in order of ambition:
 ## Acknowledgements
 
 - **[Philipp Oppermann](https://os.phil-opp.com/)** for *Writing an OS in Rust*, which this kernel
-  is built on top of. It is a genuinely outstanding piece of technical writing.
+  is built on top of.
 - **[The OSDev Wiki](https://wiki.osdev.org/)** for hardware documentation on the PIT, CMOS RTC,
   and VGA CRT controller.
 - The [`x86_64`](https://crates.io/crates/x86_64) crate and the wider Rust embedded/OSDev ecosystem.
