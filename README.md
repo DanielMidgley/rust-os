@@ -304,6 +304,7 @@ x86_64-rust-os.json   # custom bare-metal target specification
 - Rust **nightly** (pinned by `rust-toolchain`) — the kernel relies on unstable features and
   builds `core`/`alloc` from source for a custom target
 - [QEMU](https://www.qemu.org/) (`qemu-system-x86_64`) on your `PATH`
+- Python 3 (only to generate `disk.img`, the FAT16 volume QEMU attaches)
 - The bootimage tooling:
 
 ```sh
@@ -314,14 +315,18 @@ cargo install bootimage
 **Run it**
 
 ```sh
+python tools/mkfatimg.py   # once: generate disk.img (QEMU needs it to boot)
 cargo run          # build a bootable image and boot it in QEMU
 cargo build        # build the kernel only
 cargo test         # boot each integration test in QEMU, report via serial
 ```
 
-QEMU is given a second disk, `disk.img` — the FAT16 volume the kernel mounts. It is committed to
-the repository so a fresh clone just works; regenerate it with `python tools/mkfatimg.py` after
-changing what it contains.
+QEMU is given a second disk, `disk.img` — the FAT16 volume the kernel mounts. The image is not
+checked in; generate it once after cloning (and again after changing its contents):
+
+```sh
+python tools/mkfatimg.py
+```
 
 The custom target (`x86_64-rust-os.json`) disables the red zone, disables SSE/MMX and uses
 soft-float — floating-point state can't be assumed safe inside interrupt handlers — and sets

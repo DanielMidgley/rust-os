@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate `disk.img`: the FAT16 volume rust-os mounts as its filesystem.
 
-The image is committed to the repository so `cargo run` and `cargo test` work
-from a fresh clone. Re-run this script (`python tools/mkfatimg.py`) after
-changing the file contents below.
+The image is gitignored; run this script (`python tools/mkfatimg.py`) once
+after cloning, and again after changing the file contents below. `cargo run`
+and `cargo test` both attach the image and will fail without it.
 
 Geometry is chosen to be a *spec-conformant* FAT16: the FAT type is defined by
 cluster count, and 4085..=65524 clusters means FAT16. At 512-byte clusters the
