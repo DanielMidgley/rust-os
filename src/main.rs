@@ -7,7 +7,7 @@
 use core::panic::PanicInfo;
 
 use bootloader::{entry_point, BootInfo};
-use rust_os::memory::{self, BootInfoFrameAllocator};
+use rust_os::memory;
 use rust_os::task::executor::Executor;
 use rust_os::task::{shell, Task};
 use rust_os::allocator;
@@ -21,13 +21,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rust_os::init();
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe {
-        BootInfoFrameAllocator::init(&boot_info.memory_map)
-    };
-
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("heap initialization failed");
+    unsafe { memory::init_global(phys_mem_offset, &boot_info.memory_map) };
+    memory::with_kernel_memory(|mapper, frame_allocator| {
+        allocator::init_heap(mapper, frame_allocator)
+    })
+    .expect("heap initialization failed");
 
     rust_os::threads::init(); // needs the heap; adopts this flow as thread 0
 

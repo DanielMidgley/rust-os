@@ -7,7 +7,7 @@ use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
 
 use crate::task::keyboard::ScancodeStream;
-use crate::{clock, print, println, threads, time, vga_buffer};
+use crate::{clock, print, println, threads, time, usermode, vga_buffer};
 
 const PROMPT: &str = "> ";
 const HISTORY_CAP: usize = 50;
@@ -180,6 +180,7 @@ async fn execute(line: &str) {
             println!("  sleep <ms>    pause for <ms> milliseconds");
             println!("  spawn         start a busy-loop kernel thread");
             println!("  threads       list kernel threads");
+            println!("  user          run the embedded ring-3 demo program");
             println!("  about         show kernel info");
             println!("keys: up/down browse history, PgUp/PgDn scroll output");
         }
@@ -227,6 +228,13 @@ async fn execute(line: &str) {
             }
             println!("work counter: {}", WORK_COUNTER.load(Ordering::Relaxed));
         }
+        "user" => match usermode::run_user_program() {
+            Ok(usermode::FAULT_EXIT_CODE) => {
+                println!("user program was terminated by a fault");
+            }
+            Ok(code) => println!("user program exited with code {}", code),
+            Err(err) => println!("user: {}", err),
+        },
         "about" => {
             println!(
                 "rust-os v{} -- a hobby kernel built on blog_os, then extended.",

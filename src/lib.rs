@@ -16,6 +16,7 @@ pub mod threads;
 pub mod time;
 pub mod rtc;
 pub mod clock;
+pub mod usermode;
 
 extern crate alloc;
 

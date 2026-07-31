@@ -16,8 +16,12 @@ available commands:
   sleep <ms>    pause for <ms> milliseconds
   spawn         start a busy-loop kernel thread
   threads       list kernel threads
+  user          run the embedded ring-3 demo program
   about         show kernel info
 keys: up/down browse history, PgUp/PgDn scroll output
+> user
+Hello from ring 3! (write syscall via int 0x80)
+user program exited with code 3
 > spawn
 spawned thread 1 (busy loop; watch `threads`)
 > threads
@@ -65,7 +69,8 @@ A real command interpreter running as an async task on the kernel's cooperative 
   so arrowing back down returns to what was being typed
 - **Screen scrollback** — PageUp/PageDown page through the last 200 lines of output; any new
   output or keystroke snaps back to the live view
-- Commands: `help`, `clear`, `echo`, `date`, `uptime`, `sleep`, `spawn`, `threads`, `about`
+- Commands: `help`, `clear`, `echo`, `date`, `uptime`, `sleep`, `spawn`, `threads`, `user`,
+  `about`
 
 ### PIT-backed monotonic clock and async `sleep`
 
@@ -110,6 +115,27 @@ politely take turns" to "the kernel decides who runs."
 - **Proven by an integration test**: a busy-loop thread that never yields, watched by a main
   flow that never yields either — only timer preemption can interleave them (`tests/preemption.rs`)
 - Shell: `spawn` starts a busy worker; `threads` lists thread states live
+
+### User mode (ring 3) + system calls
+
+Code running with user privileges, talking to the kernel only through a syscall interface — the
+kernel/userspace boundary that everything else in an OS is built around.
+
+- **Ring-3 GDT segments** and a TSS privilege stack (RSP0) so interrupts arriving during user
+  code switch to a kernel stack safely
+- **`int 0x80` syscall gate** (DPL 3) with a register-based ABI: `rax` = number,
+  `rdi`/`rsi`/`rdx` = args — syscalls: `exit`, `write`, `uptime_ms`
+- `write` validates that user pointers lie inside the user region before touching them
+- User pages mapped `USER_ACCESSIBLE` — including widening the *pre-existing parent* page-table
+  entries, the step everyone forgets (see [Engineering notes](#engineering-notes))
+- **setjmp/longjmp-style entry**: entering user mode saves the kernel context; the exit syscall
+  (or a fault) restores it as if the call had returned, carrying the exit code
+- **Fault containment**: a page fault or GPF from ring 3 kills the user program and returns to
+  the shell — a crashing user program cannot take the kernel down
+- No ELF loader yet, so the demo program is hand-written assembly embedded in the kernel and
+  copied into user pages; it exits with its own CPL, and an integration test asserts the exit
+  code is 3 — proof it ran in ring 3
+- Preemption keeps working while user code runs: kernel threads and ring 3 interleave
 
 ### VGA text driver improvements
 
@@ -170,6 +196,14 @@ plausible-looking but wrong timestamps:
 **Bounded hardware waits.** Every spin loop against hardware has an iteration ceiling, so a
 misbehaving or absent device degrades instead of hanging the kernel.
 
+**The page-table flag everyone forgets.** Mapping a user page `USER_ACCESSIBLE` isn't enough:
+every parent level of the page-table walk (P4 → P3 → P2) must carry the flag too, or the CPU
+faults the walk at that level. The mapping API only applies flags to tables it *creates* — the
+bootloader's pre-existing entries for the low address space had to be widened by hand. The
+resulting debug session (user rip faulting on a read of address `0x30`) also surfaced a classic
+Intel-syntax assembler trap: `mov rsi, symbol` assembles as a *load from* that address, not the
+constant — it needs `offset`.
+
 **Context switching from inside an interrupt handler.** Three ordering rules make preemption
 sound: the PIC gets its end-of-interrupt *before* the switch (the next thread runs with the old
 thread's interrupt frame still parked on its stack — an unacknowledged PIC would silently stop
@@ -197,6 +231,8 @@ src/
 ├── clock.rs          # kernel wall clock: RTC-seeded, PIT-advanced
 ├── threads.rs        # preemptive kernel threads: scheduler, spawn/exit/reap
 ├── threads.s         # context switch + thread entry trampoline (assembly)
+├── usermode.rs       # ring 3: user page mapping, syscall dispatch, run/exit
+├── usermode.s        # syscall entry stub, iretq entry/exit, demo program
 └── task/
     ├── mod.rs            # task abstraction
     ├── executor.rs       # waker-based cooperative executor
@@ -245,7 +281,7 @@ Planned work, roughly in order of ambition:
 - [x] Kernel-maintained clock (seed from the RTC once at boot, advance with PIT ticks)
 - [x] **Preemptive multitasking** — kernel threads with separate stacks and timer-driven context
       switching, moving past the current cooperative model
-- [ ] **User mode (ring 3) and system calls**
+- [x] **User mode (ring 3) and system calls**
 - [ ] **A filesystem** — ATA/virtio block driver plus FAT
 - [ ] **ELF loader and real processes**
 - [ ] Networking — NIC driver and a minimal TCP/IP stack

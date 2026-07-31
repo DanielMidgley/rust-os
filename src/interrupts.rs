@@ -3,8 +3,12 @@ use pic8259::ChainedPics;
 use x86_64::instructions::port::Port;
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::PrivilegeLevel;
 
-use crate::{gdt, hlt_loop, println, threads, time};
+use crate::{gdt, hlt_loop, println, threads, time, usermode};
+
+/// Software interrupt vector for system calls, reachable from ring 3.
+pub const SYSCALL_VECTOR: u8 = 0x80;
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -40,6 +44,15 @@ lazy_static! {
         idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
+        idt.general_protection_fault
+            .set_handler_fn(general_protection_fault_handler);
+        // Syscall gate: a raw asm entry stub (it must read the user's
+        // registers), DPL 3 so ring 3 may invoke it.
+        unsafe {
+            idt[SYSCALL_VECTOR]
+                .set_handler_addr(usermode::syscall_entry_addr())
+                .set_privilege_level(PrivilegeLevel::Ring3);
+        }
 
         idt
     };
@@ -90,11 +103,52 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    // A fault from ring 3 kills the user program, not the kernel.
+    if error_code.contains(PageFaultErrorCode::USER_MODE) && usermode::user_active() {
+        println!(
+            "user program page fault at {:?} ({:?}); terminating it",
+            Cr2::read(),
+            error_code
+        );
+        crate::serial_println!(
+            "user page fault: cr2={:?} err={:?} rip={:?}",
+            Cr2::read(),
+            error_code,
+            stack_frame.instruction_pointer
+        );
+        usermode::exit_user_program(usermode::FAULT_EXIT_CODE);
+    }
+
     println!("EXCEPTION: PAGE FAULT");
     println!("Accessed Address: {:?}", Cr2::read());
     println!("Error Code: {:?}", error_code);
     println!("{:#?}", stack_frame);
     hlt_loop();
+}
+
+extern "x86-interrupt" fn general_protection_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    // Ring-3 GPF (privileged instruction, bad selector, ...): kill the user
+    // program and carry on.
+    if usermode::user_active() && stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
+        println!(
+            "user program general protection fault (error code {}); terminating it",
+            error_code
+        );
+        crate::serial_println!(
+            "user gpf: err={} rip={:?}",
+            error_code,
+            stack_frame.instruction_pointer
+        );
+        usermode::exit_user_program(usermode::FAULT_EXIT_CODE);
+    }
+
+    panic!(
+        "EXCEPTION: GENERAL PROTECTION FAULT (error code {})\n{:#?}",
+        error_code, stack_frame
+    );
 }
 
 #[test_case]

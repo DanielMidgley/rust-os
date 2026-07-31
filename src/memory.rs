@@ -1,10 +1,89 @@
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use conquer_once::spin::OnceCell;
+use spin::Mutex;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::page_table::FrameError;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
 };
 use x86_64::{PhysAddr, VirtAddr};
+
+/// The kernel's page table mapper and frame allocator, made globally
+/// available so subsystems initialised after boot (e.g. user-mode setup) can
+/// map pages. Never locked in interrupt context.
+struct KernelMemory {
+    mapper: OffsetPageTable<'static>,
+    frame_allocator: BootInfoFrameAllocator,
+}
+
+static KERNEL_MEMORY: OnceCell<Mutex<KernelMemory>> = OnceCell::uninit();
+
+/// The physical-memory mapping offset, kept for raw page-table walks.
+static PHYS_OFFSET: OnceCell<VirtAddr> = OnceCell::uninit();
+
+/// Initializes the global mapper and frame allocator.
+///
+/// # Safety
+///
+/// Same contract as [`init`] and [`BootInfoFrameAllocator::init`]: the
+/// complete physical memory must be mapped at `physical_memory_offset`, the
+/// memory map must be valid, and this must be called only once.
+pub unsafe fn init_global(physical_memory_offset: VirtAddr, memory_map: &'static MemoryMap) {
+    PHYS_OFFSET
+        .try_init_once(|| physical_memory_offset)
+        .expect("memory::init_global should only be called once");
+    KERNEL_MEMORY
+        .try_init_once(|| unsafe {
+            Mutex::new(KernelMemory {
+                mapper: init(physical_memory_offset),
+                frame_allocator: BootInfoFrameAllocator::init(memory_map),
+            })
+        })
+        .expect("memory::init_global should only be called once");
+}
+
+/// ORs `USER_ACCESSIBLE` into the P4/P3/P2 entries covering `addr`.
+///
+/// `map_to_with_table_flags` applies its parent flags only to page tables it
+/// *creates*; entries that already existed (e.g. the bootloader's P4 entry
+/// for the low half of the address space) keep their supervisor-only flags,
+/// and a ring-3 walk faults at that level. This widens the existing entries.
+/// Safe in practice because access is still gated by the leaf entries: kernel
+/// pages under these tables remain supervisor-only.
+///
+/// Call with the kernel memory lock held (inside [`with_kernel_memory`]) and
+/// flush the TLB afterwards. Assumes 4 KiB mappings (no huge pages) at `addr`.
+pub(crate) fn mark_parents_user_accessible(addr: VirtAddr) {
+    let offset = *PHYS_OFFSET
+        .try_get()
+        .expect("memory::init_global has not been called");
+    let (level_4_frame, _) = Cr3::read();
+    let mut table_ptr =
+        (offset + level_4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+    for index in [addr.p4_index(), addr.p3_index(), addr.p2_index()] {
+        let table = unsafe { &mut *table_ptr };
+        let entry = &mut table[index];
+        entry.set_flags(entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+        table_ptr = (offset + entry.addr().as_u64()).as_mut_ptr::<PageTable>();
+    }
+}
+
+/// Runs `f` with exclusive access to the global mapper and frame allocator.
+///
+/// Panics if [`init_global`] has not been called.
+pub fn with_kernel_memory<R>(
+    f: impl FnOnce(&mut OffsetPageTable<'static>, &mut BootInfoFrameAllocator) -> R,
+) -> R {
+    let memory = KERNEL_MEMORY
+        .try_get()
+        .expect("memory::init_global has not been called");
+    let mut guard = memory.lock();
+    let KernelMemory {
+        mapper,
+        frame_allocator,
+    } = &mut *guard;
+    f(mapper, frame_allocator)
+}
 
 /// Initialize a new OffsetPageTable.
 ///
