@@ -21,6 +21,12 @@ pub static PICS: spin::Mutex<ChainedPics> =
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
+    /// Primary ATA bus. The disk driver polls rather than waiting on this, but
+    /// the device still asserts it on command completion, and an IRQ with no
+    /// IDT entry escalates into a double fault — so it must be handled.
+    PrimaryAta = PIC_2_OFFSET + 6,
+    /// Secondary ATA bus, same reasoning.
+    SecondaryAta = PIC_2_OFFSET + 7,
 }
 
 impl InterruptIndex {
@@ -43,6 +49,8 @@ lazy_static! {
         }
         idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
+        idt[InterruptIndex::PrimaryAta.as_u8()].set_handler_fn(primary_ata_interrupt_handler);
+        idt[InterruptIndex::SecondaryAta.as_u8()].set_handler_fn(secondary_ata_interrupt_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
         idt.general_protection_fault
             .set_handler_fn(general_protection_fault_handler);
@@ -96,6 +104,24 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+}
+
+/// The ATA driver polls and asks devices not to raise interrupts (nIEN), so
+/// this should never fire — but a stray IRQ with no IDT entry escalates into a
+/// double fault, so it is handled and acknowledged. Acknowledging also matters
+/// because an un-EOI'd IRQ blocks every lower-priority one, including the timer.
+extern "x86-interrupt" fn primary_ata_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::PrimaryAta.as_u8());
+    }
+}
+
+extern "x86-interrupt" fn secondary_ata_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::SecondaryAta.as_u8());
     }
 }
 

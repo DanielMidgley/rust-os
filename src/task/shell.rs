@@ -7,7 +7,7 @@ use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
 
 use crate::task::keyboard::ScancodeStream;
-use crate::{clock, print, println, threads, time, usermode, vga_buffer};
+use crate::{clock, fat, print, println, threads, time, usermode, vga_buffer};
 
 const PROMPT: &str = "> ";
 const HISTORY_CAP: usize = 50;
@@ -86,6 +86,24 @@ impl History {
                 Some(mem::take(&mut self.stash))
             }
         }
+    }
+}
+
+/// The single argument after a command word, if there is one.
+fn argument(line: &str) -> Option<&str> {
+    let rest = line.splitn(2, char::is_whitespace).nth(1)?.trim();
+    if rest.is_empty() { None } else { Some(rest) }
+}
+
+/// Human-readable filesystem errors — `ls: not found` beats a Debug dump.
+fn describe(err: fat::FsError) -> &'static str {
+    match err {
+        fat::FsError::NoFilesystem => "no FAT16 disk attached",
+        fat::FsError::Io(_) => "disk read failed",
+        fat::FsError::NotFound => "no such file or directory",
+        fat::FsError::NotADirectory => "not a directory",
+        fat::FsError::IsADirectory => "is a directory",
+        fat::FsError::CorruptChain => "corrupt cluster chain",
     }
 }
 
@@ -181,6 +199,9 @@ async fn execute(line: &str) {
             println!("  spawn         start a busy-loop kernel thread");
             println!("  threads       list kernel threads");
             println!("  user          run the embedded ring-3 demo program");
+            println!("  ls [path]     list a directory on the disk");
+            println!("  cat <path>    print a file from the disk");
+            println!("  disk          show mounted volume info");
             println!("  about         show kernel info");
             println!("keys: up/down browse history, PgUp/PgDn scroll output");
         }
@@ -234,6 +255,42 @@ async fn execute(line: &str) {
             }
             Ok(code) => println!("user program exited with code {}", code),
             Err(err) => println!("user: {}", err),
+        },
+        "ls" => {
+            let path = argument(line).unwrap_or("/");
+            match fat::list(path, |name, is_dir, size| {
+                if is_dir {
+                    println!("  {:<12}  <DIR>", name);
+                } else {
+                    println!("  {:<12}  {:>7}", name, size);
+                }
+            }) {
+                Ok(count) => println!("{} entries", count),
+                Err(err) => println!("ls: {}", describe(err)),
+            }
+        }
+        "cat" => match argument(line) {
+            None => println!("usage: cat <path>"),
+            Some(path) => match fat::read_file(path, |chunk| {
+                for &byte in chunk {
+                    print!("{}", byte as char);
+                }
+            }) {
+                Ok(_) => {}
+                Err(err) => println!("cat: {}", describe(err)),
+            },
+        },
+        "disk" => match fat::info() {
+            Ok(info) => {
+                println!(
+                    "FAT16 on ATA drive {} -- {} clusters of {} bytes ({} KiB)",
+                    info.drive,
+                    info.cluster_count,
+                    info.bytes_per_cluster,
+                    info.cluster_count * info.bytes_per_cluster / 1024
+                );
+            }
+            Err(err) => println!("disk: {}", describe(err)),
         },
         "about" => {
             println!(

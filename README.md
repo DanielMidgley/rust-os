@@ -17,8 +17,19 @@ available commands:
   spawn         start a busy-loop kernel thread
   threads       list kernel threads
   user          run the embedded ring-3 demo program
+  ls [path]     list a directory on the disk
+  cat <path>    print a file from the disk
+  disk          show mounted volume info
   about         show kernel info
 keys: up/down browse history, PgUp/PgDn scroll output
+> ls
+  HELLO.TXT          33
+  README.TXT        295
+  POEM.TXT         1960
+  DOCS            <DIR>
+4 entries
+> cat hello.txt
+Hello from the FAT16 filesystem!
 > user
 Hello from ring 3! (write syscall via int 0x80)
 user program exited with code 3
@@ -70,7 +81,7 @@ A real command interpreter running as an async task on the kernel's cooperative 
 - **Screen scrollback** — PageUp/PageDown page through the last 200 lines of output; any new
   output or keystroke snaps back to the live view
 - Commands: `help`, `clear`, `echo`, `date`, `uptime`, `sleep`, `spawn`, `threads`, `user`,
-  `about`
+  `ls`, `cat`, `disk`, `about`
 
 ### PIT-backed monotonic clock and async `sleep`
 
@@ -137,6 +148,27 @@ kernel/userspace boundary that everything else in an OS is built around.
   code is 3 — proof it ran in ring 3
 - Preemption keeps working while user code runs: kernel threads and ring 3 interleave
 
+### Filesystem: ATA disk driver + FAT16
+
+Real files on a real (virtual) disk, read by the kernel's own driver and filesystem parser — no
+firmware calls, no libraries.
+
+- **ATA PIO driver** — task-file registers, LBA28 addressing, IDENTIFY and READ SECTORS,
+  polling mode with every hardware wait bounded
+- **Read-only FAT16** — BPB parsing and validation, the fixed root-directory region,
+  subdirectory cluster chains, 8.3 short names, case-insensitive path resolution
+- **Zero allocation in the whole filesystem stack** — the kernel heap is 100 KiB, so `cat` on a
+  file of any size streams through a single 512-byte stack buffer and a callback rather than
+  buffering the file
+- **Untrusted-input discipline** — the BPB is validated before use, cluster numbers are
+  range-checked, and every chain walk is bounded so a corrupt or cyclic FAT cannot hang the
+  kernel
+- Probes both ATA drives and mounts whichever holds a real FAT16 volume, so the boot disk
+  (whose sector 0 also ends in `0x55AA`) is correctly rejected
+- Shell: `ls [path]`, `cat <path>`, `disk`
+- The volume is built by [`tools/mkfatimg.py`](tools/mkfatimg.py) and verified end-to-end by
+  `tests/filesystem.rs`, which asserts on exact file contents, sizes, and a multi-cluster chain
+
 ### VGA text driver improvements
 
 - `backspace()` and `clear_screen()` for interactive editing
@@ -196,6 +228,23 @@ plausible-looking but wrong timestamps:
 **Bounded hardware waits.** Every spin loop against hardware has an iteration ceiling, so a
 misbehaving or absent device degrades instead of hanging the kernel.
 
+**An interrupt you don't want is still an interrupt you must handle.** The first disk read
+double-faulted, apparently deep inside a port write. The cause was neither the port
+nor the stack — the ATA controller asserts IRQ 14 on command completion, and an interrupt whose
+IDT entry is absent escalates into a double fault. A polling driver still has to account for the
+interrupts it is ignoring. Fixed at both ends: the driver sets nIEN so devices stop asserting
+the line, and the IRQ is given a handler anyway, because a stray interrupt should be logged and
+acknowledged rather than fatal. (Acknowledging matters independently: an un-EOI'd IRQ blocks
+every lower-priority one, the timer included.)
+
+**When "always disable interrupts around a shared lock" is the wrong answer.** Every other lock
+in this kernel that an interrupt handler touches is taken inside `without_interrupts`. The disk
+lock deliberately is not: a sector read can spin for milliseconds, and holding interrupts off
+that long would stall the timer, stopping both the clock and preemption. No handler touches ATA,
+so a plain spinlock held with interrupts *enabled* is correct — contention resolves through
+preemption, exactly like the heap allocator's lock. The rule is "match the lock discipline to
+who actually contends," not "disable interrupts everywhere."
+
 **The page-table flag everyone forgets.** Mapping a user page `USER_ACCESSIBLE` isn't enough:
 every parent level of the page-table walk (P4 → P3 → P2) must carry the flag too, or the CPU
 faults the walk at that level. The mapping API only applies flags to tables it *creates* — the
@@ -233,6 +282,8 @@ src/
 ├── threads.s         # context switch + thread entry trampoline (assembly)
 ├── usermode.rs       # ring 3: user page mapping, syscall dispatch, run/exit
 ├── usermode.s        # syscall entry stub, iretq entry/exit, demo program
+├── ata.rs            # ATA PIO disk driver (polling, LBA28)
+└── fat.rs            # read-only FAT16: BPB, directories, cluster chains
 └── task/
     ├── mod.rs            # task abstraction
     ├── executor.rs       # waker-based cooperative executor
@@ -240,6 +291,7 @@ src/
     ├── keyboard.rs       # scancode stream
     └── shell.rs          # interactive shell
 tests/                # integration tests, each booted in QEMU
+tools/mkfatimg.py     # builds disk.img, the FAT16 volume the kernel mounts
 x86_64-rust-os.json   # custom bare-metal target specification
 ```
 
@@ -267,6 +319,10 @@ cargo build        # build the kernel only
 cargo test         # boot each integration test in QEMU, report via serial
 ```
 
+QEMU is given a second disk, `disk.img` — the FAT16 volume the kernel mounts. It is committed to
+the repository so a fresh clone just works; regenerate it with `python tools/mkfatimg.py` after
+changing what it contains.
+
 The custom target (`x86_64-rust-os.json`) disables the red zone, disables SSE/MMX and uses
 soft-float — floating-point state can't be assumed safe inside interrupt handlers — and sets
 `panic = "abort"`, since unwinding needs runtime support the kernel doesn't have.
@@ -282,7 +338,7 @@ Planned work, roughly in order of ambition:
 - [x] **Preemptive multitasking** — kernel threads with separate stacks and timer-driven context
       switching, moving past the current cooperative model
 - [x] **User mode (ring 3) and system calls**
-- [ ] **A filesystem** — ATA/virtio block driver plus FAT
+- [x] **A filesystem** — ATA block driver plus FAT16
 - [ ] **ELF loader and real processes**
 - [ ] Networking — NIC driver and a minimal TCP/IP stack
 

@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [package.metadata.bootimage]
+# The data disk is attached as the primary ATA slave (index 1); the boot image
+# itself occupies index 0. Generate/refresh it with `python tools/mkfatimg.py`.
+run-args = [
+    "-drive", "format=raw,file=disk.img,if=ide,index=1,media=disk"
+]
 test-args = [
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", 
+    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
     "-serial","stdio",
-    "-display", "none"
+    "-display", "none",
+    "-drive", "format=raw,file=disk.img,if=ide,index=1,media=disk"
 ]
 test-success-exit-code = 33     # (0x10 << 1) | 1
 test-timeout = 300              # in seconds
