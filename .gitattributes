@@ -1,1 +1,2 @@
+*.rs linguist-language=Rust
 *.s linguist-language=Assembly
