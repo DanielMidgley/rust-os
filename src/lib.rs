@@ -14,6 +14,7 @@ pub mod allocator;
 pub mod task;
 pub mod time;
 pub mod rtc;
+pub mod clock;
 
 extern crate alloc;
 
@@ -30,6 +31,7 @@ pub fn init() {
     unsafe { interrupts::PICS.lock().initialize() };
     time::init(); // program the PIT before enabling interrupts
     x86_64::instructions::interrupts::enable();
+    clock::init(); // seed the wall clock from the RTC, once, after ticks start
 }
 
 pub fn hlt_loop() -> ! {

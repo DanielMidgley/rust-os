@@ -75,6 +75,17 @@ Real date and time read directly from the real-time clock over the CMOS index/da
 Getting this right meant handling three separate hardware quirks that each silently corrupt the
 result — see [Engineering notes](#engineering-notes).
 
+### Kernel-maintained clock
+
+How real kernels keep time: the RTC is read **exactly once, at boot**, capturing a wall-clock
+reference alongside the PIT tick count. From then on `date` is derived from
+`boot time + elapsed ticks` — an atomic load and calendar arithmetic, with no port I/O and no
+spinning on RTC update flags.
+
+- Unix-seconds ↔ civil-date conversion via Howard Hinnant's `days_from_civil` /
+  `civil_from_days` algorithms, handling leap years correctly across century boundaries
+- Calendar math covered by in-kernel unit tests (epoch, leap day, year boundary, known timestamps)
+
 ### VGA text driver improvements
 
 - `backspace()` and `clear_screen()` for interactive editing
@@ -149,7 +160,8 @@ src/
 ├── memory.rs         # paging, page table walk, frame allocator
 ├── allocator.rs      # kernel heap
 ├── time.rs           # PIT clock, tick counter, async sleep
-├── rtc.rs            # CMOS real-time clock, wall-clock time
+├── rtc.rs            # CMOS real-time clock driver
+├── clock.rs          # kernel wall clock: RTC-seeded, PIT-advanced
 └── task/
     ├── mod.rs            # task abstraction
     ├── executor.rs       # waker-based cooperative executor
@@ -195,7 +207,7 @@ soft-float — floating-point state can't be assumed safe inside interrupt handl
 Planned work, roughly in order of ambition:
 
 - [x] Command history and scrollback in the shell
-- [ ] Kernel-maintained clock (seed from the RTC once at boot, advance with PIT ticks)
+- [x] Kernel-maintained clock (seed from the RTC once at boot, advance with PIT ticks)
 - [ ] **Preemptive multitasking** — kernel threads with separate stacks and timer-driven context
       switching, moving past the current cooperative model
 - [ ] **User mode (ring 3) and system calls**

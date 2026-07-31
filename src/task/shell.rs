@@ -6,7 +6,7 @@ use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
 
 use crate::task::keyboard::ScancodeStream;
-use crate::{print, println, rtc, time, vga_buffer};
+use crate::{clock, print, println, time, vga_buffer};
 
 const PROMPT: &str = "> ";
 const HISTORY_CAP: usize = 50;
@@ -174,7 +174,7 @@ async fn execute(line: &str) {
             let arg = line.splitn(2, char::is_whitespace).nth(1).unwrap_or("");
             println!("{}", arg.trim_start());
         }
-        "date" => println!("{} UTC", rtc::read()),
+        "date" => println!("{} UTC", clock::now()),
         "uptime" => {
             let ms = time::uptime_ms();
             println!("up {}.{:03} s", ms / 1000, ms % 1000);
