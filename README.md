@@ -15,6 +15,7 @@ available commands:
   uptime        show time since boot
   sleep <ms>    pause for <ms> milliseconds
   about         show kernel info
+keys: up/down browse history, PgUp/PgDn scroll output
 > date
 2026-07-19 14:33:07 UTC
 > uptime
@@ -52,6 +53,10 @@ A real command interpreter running as an async task on the kernel's cooperative 
 - Tokenised command dispatch with argument parsing
 - **Async command execution** — commands can `.await`, so `sleep 2000` suspends the shell task for
   two seconds without blocking the executor or stalling interrupt handling
+- **Command history** — up/down arrows recall the last 50 commands, stashing the in-progress line
+  so arrowing back down returns to what was being typed
+- **Screen scrollback** — PageUp/PageDown page through the last 200 lines of output; any new
+  output or keystroke snaps back to the live view
 - Commands: `help`, `clear`, `echo`, `date`, `uptime`, `sleep`, `about`
 
 ### PIT-backed monotonic clock and async `sleep`
@@ -75,6 +80,9 @@ result — see [Engineering notes](#engineering-notes).
 - `backspace()` and `clear_screen()` for interactive editing
 - **Hardware cursor control** — enabling the cursor and moving it to follow typed output, by
   programming the VGA CRT controller's cursor-shape and cursor-position registers
+- **Scrollback ring buffer** — rows scrolling off the top are archived into a fixed 200-line ring
+  (no heap allocation on the write path), with a paged history view that snapshots and restores
+  the live screen
 
 ---
 
@@ -186,7 +194,7 @@ soft-float — floating-point state can't be assumed safe inside interrupt handl
 
 Planned work, roughly in order of ambition:
 
-- [ ] Command history and scrollback in the shell
+- [x] Command history and scrollback in the shell
 - [ ] Kernel-maintained clock (seed from the RTC once at boot, advance with PIT ticks)
 - [ ] **Preemptive multitasking** — kernel threads with separate stacks and timer-driven context
       switching, moving past the current cooperative model
