@@ -89,28 +89,6 @@ exit_user:
     pop rbp
     ret
 
-/* The embedded ring-3 demo program. Copied verbatim into user-accessible
- * pages and entered at its first byte; rip-relative addressing keeps the
- * message reachable after the copy. Exits with its own CPL (cs & 3) so the
- * kernel can assert the program really ran in ring 3.
+/* The demo program that used to live here is now a real ELF binary on disk
+ * (tools/mkelf.py builds it; src/process.rs loads it).
  */
-.global user_program_start
-user_program_start:
-    /* write(message, len) */
-    mov rax, 1
-    lea rdi, [rip + user_msg]
-    mov rsi, offset user_msg_len /* `offset`: the constant, not a load */
-    int 0x80
-    /* exit(cs & 3): 3 proves ring 3 */
-    xor rax, rax
-    xor edi, edi
-    mov di, cs
-    and edi, 3
-    int 0x80
-1:  jmp 1b
-user_msg:
-    .ascii "Hello from ring 3! (write syscall via int 0x80)\n"
-user_msg_end:
-.set user_msg_len, user_msg_end - user_msg
-.global user_program_end
-user_program_end:

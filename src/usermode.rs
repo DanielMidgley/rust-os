@@ -1,57 +1,48 @@
-//! User mode (ring 3) and system calls.
+//! Ring-3 transitions and system calls.
 //!
-//! There is no ELF loader yet, so the "user program" is a small assembly
-//! routine embedded in the kernel image (see usermode.s), copied at run time
-//! into pages mapped `USER_ACCESSIBLE`. `run_user_program` enters it via
-//! `iretq`; it talks back to the kernel through `int 0x80` and returns via
-//! the exit syscall — or by faulting, in which case the fault handlers kill
-//! it and the kernel carries on.
+//! This module owns the mechanics of leaving and re-entering kernel mode;
+//! [`crate::process`] owns address spaces and deciding *what* to run. The
+//! split matters because entry/exit is the part that must be exactly right at
+//! the instruction level, and it is now independent of where the program came
+//! from.
 //!
 //! ## Syscall ABI (int 0x80)
 //!
 //! rax = syscall number, rdi/rsi/rdx = arguments, return value in rax.
 //!
-//! | nr | name      | args           | returns            |
-//! |----|-----------|----------------|--------------------|
-//! | 0  | exit      | code           | (does not return)  |
-//! | 1  | write     | ptr, len       | bytes written      |
-//! | 2  | uptime_ms | —              | ms since boot      |
+//! | nr | name      | args      | returns            |
+//! |----|-----------|-----------|--------------------|
+//! | 0  | exit      | code      | (does not return)  |
+//! | 1  | write     | ptr, len  | bytes written      |
+//! | 2  | uptime_ms | —         | ms since boot      |
+//! | 3  | getpid    | —         | current pid        |
 //!
 //! ## Constraints
 //!
-//! * **One user program at a time** (`USER_ACTIVE`): ring-3 execution
-//!   borrows the single TSS RSP0 stack and the single saved-kernel-context
-//!   slot. Only the shell (thread 0) enters user mode.
-//! * User pages live in their own region; `sys_write` refuses pointers
-//!   outside it, so user code can't make the kernel read kernel memory.
-//! * The page-table *parents* of user mappings need `USER_ACCESSIBLE` too —
-//!   hence `map_to_with_table_flags`.
+//! * **One user program at a time** ([`USER_ACTIVE`]): ring-3 execution
+//!   borrows the single TSS `RSP0` stack and one saved-kernel-context slot.
+//! * `write` refuses pointers outside the running process's region, so user
+//!   code cannot make the kernel read kernel memory on its behalf.
+//! * Syscalls run with interrupts disabled on the `RSP0` stack: keep them
+//!   short and non-blocking.
 
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
 
-use crate::{gdt, memory, print, time};
+use crate::{gdt, print, time};
 
 /// Exit code reported when a fault handler kills a misbehaving user program.
 pub const FAULT_EXIT_CODE: u64 = 0xDEAD;
 
-const PAGE_SIZE: u64 = 4096;
-const USER_CODE_START: u64 = 0x5000_0000;
-const USER_CODE_SIZE: u64 = 4 * PAGE_SIZE;
-const USER_STACK_START: u64 = 0x5010_0000;
-const USER_STACK_SIZE: u64 = 4 * PAGE_SIZE;
-const USER_STACK_TOP: u64 = USER_STACK_START + USER_STACK_SIZE;
-
 const SYSCALL_EXIT: u64 = 0;
 const SYSCALL_WRITE: u64 = 1;
 const SYSCALL_UPTIME_MS: u64 = 2;
+const SYSCALL_GETPID: u64 = 3;
 
 global_asm!(include_str!("usermode.s"), syscall_handler = sym syscall_handler);
 
-#[allow(non_upper_case_globals)]
 unsafe extern "C" {
     /// setjmp half: saves kernel context into `saved_rsp_slot`, `iretq`s to
     /// ring 3, and "returns" the exit code once `exit_user` longjmps back.
@@ -69,9 +60,6 @@ unsafe extern "C" {
 
     /// int 0x80 entry stub; its address goes into the IDT.
     fn syscall_entry();
-
-    static user_program_start: u8;
-    static user_program_end: u8;
 }
 
 /// True while a user program is executing (or suspended by preemption).
@@ -80,7 +68,11 @@ static USER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Kernel rsp saved by `enter_user`, consumed by `exit_user`.
 static SAVED_KERNEL_RSP: AtomicU64 = AtomicU64::new(0);
 
-static USER_PAGES_MAPPED: AtomicBool = AtomicBool::new(false);
+/// The running process's pid and the bounds of memory it may pass to the
+/// kernel. Valid only while `USER_ACTIVE`.
+static CURRENT_PID: AtomicU64 = AtomicU64::new(0);
+static RANGE_START: AtomicU64 = AtomicU64::new(0);
+static RANGE_END: AtomicU64 = AtomicU64::new(0);
 
 /// The address of the int 0x80 entry stub, for IDT registration.
 pub(crate) fn syscall_entry_addr() -> VirtAddr {
@@ -93,36 +85,49 @@ pub(crate) fn user_active() -> bool {
     USER_ACTIVE.load(Ordering::SeqCst)
 }
 
-/// Copies the embedded demo program into user pages and runs it in ring 3.
-/// Blocks until it exits (kernel threads still preempt); returns its exit
-/// code, [`FAULT_EXIT_CODE`] if it was killed by a fault.
-pub fn run_user_program() -> Result<u64, &'static str> {
+/// Enters ring 3 at `entry` and returns the program's exit code.
+///
+/// The caller is responsible for having made the target address space active
+/// and for tearing it down afterwards.
+///
+/// # Safety
+///
+/// `entry` and `stack_top` must be mapped, user-accessible addresses in the
+/// currently active address space, and `[range_start, range_end)` must
+/// describe memory that address space lets user code reach.
+pub(crate) unsafe fn enter(
+    entry: u64,
+    stack_top: u64,
+    pid: u64,
+    range_start: u64,
+    range_end: u64,
+) -> u64 {
     if USER_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Err("a user program is already running");
+        // process::exec checks this first; reaching here would mean two
+        // programs sharing one RSP0 stack.
+        panic!("a user program is already running");
     }
-
-    ensure_user_pages();
-    if let Err(err) = copy_program() {
-        USER_ACTIVE.store(false, Ordering::SeqCst);
-        return Err(err);
-    }
+    CURRENT_PID.store(pid, Ordering::SeqCst);
+    RANGE_START.store(range_start, Ordering::SeqCst);
+    RANGE_END.store(range_end, Ordering::SeqCst);
 
     let (user_cs, user_ss) = gdt::user_selectors();
     let code = unsafe {
         enter_user(
-            USER_CODE_START,
-            USER_STACK_TOP,
+            entry,
+            stack_top,
             SAVED_KERNEL_RSP.as_ptr(),
             user_cs.0 as u64,
             user_ss.0 as u64,
         )
     };
+
     USER_ACTIVE.store(false, Ordering::SeqCst);
-    Ok(code)
+    code
 }
 
 /// Terminates the running user program with `code`, longjmping back into
-/// `run_user_program`. Called by the exit syscall and by fault handlers.
+/// [`enter`]. Called by the exit syscall and by fault handlers.
 pub(crate) fn exit_user_program(code: u64) -> ! {
     assert!(
         user_active(),
@@ -132,65 +137,6 @@ pub(crate) fn exit_user_program(code: u64) -> ! {
     unsafe { exit_user(kernel_rsp, code) }
 }
 
-/// Maps (once) and zeroes the user code and stack regions. Every page —
-/// and, crucially, every parent page-table entry — gets `USER_ACCESSIBLE`.
-fn ensure_user_pages() {
-    if USER_PAGES_MAPPED.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let flags =
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-    memory::with_kernel_memory(|mapper, frame_allocator| {
-        let regions = [
-            (USER_CODE_START, USER_CODE_SIZE),
-            (USER_STACK_START, USER_STACK_SIZE),
-        ];
-        for (start, size) in regions {
-            for i in 0..size / PAGE_SIZE {
-                let addr = VirtAddr::new(start + i * PAGE_SIZE);
-                let page: Page<Size4KiB> = Page::containing_address(addr);
-                let frame = frame_allocator
-                    .allocate_frame()
-                    .expect("out of frames for user pages");
-                unsafe {
-                    mapper
-                        .map_to_with_table_flags(page, frame, flags, flags, frame_allocator)
-                        .expect("failed to map user page")
-                        .flush();
-                }
-                // map_to_with_table_flags only flags tables it creates;
-                // pre-existing parent entries (the bootloader's) must be
-                // widened by hand or the ring-3 page walk faults.
-                memory::mark_parents_user_accessible(addr);
-            }
-        }
-    });
-    x86_64::instructions::tlb::flush_all();
-
-    // Fresh frames hold whatever was in RAM; zero both regions through the
-    // new mappings.
-    unsafe {
-        core::ptr::write_bytes(USER_CODE_START as *mut u8, 0, USER_CODE_SIZE as usize);
-        core::ptr::write_bytes(USER_STACK_START as *mut u8, 0, USER_STACK_SIZE as usize);
-    }
-
-    USER_PAGES_MAPPED.store(true, Ordering::SeqCst);
-}
-
-/// Copies the embedded program bytes from the kernel image into the user
-/// code region.
-fn copy_program() -> Result<(), &'static str> {
-    let start = &raw const user_program_start;
-    let end = &raw const user_program_end;
-    let len = end as usize - start as usize;
-    if len as u64 > USER_CODE_SIZE {
-        return Err("embedded user program exceeds the user code region");
-    }
-    unsafe { core::ptr::copy_nonoverlapping(start, USER_CODE_START as *mut u8, len) };
-    Ok(())
-}
-
 /// Rust half of the int 0x80 path; called by `syscall_entry` with interrupts
 /// disabled, on the RSP0 stack.
 extern "C" fn syscall_handler(nr: u64, a1: u64, a2: u64, _a3: u64) -> u64 {
@@ -198,13 +144,16 @@ extern "C" fn syscall_handler(nr: u64, a1: u64, a2: u64, _a3: u64) -> u64 {
         SYSCALL_EXIT => exit_user_program(a1),
         SYSCALL_WRITE => sys_write(a1, a2),
         SYSCALL_UPTIME_MS => time::uptime_ms(),
+        SYSCALL_GETPID => CURRENT_PID.load(Ordering::SeqCst),
         _ => u64::MAX,
     }
 }
 
-/// write(ptr, len): prints bytes from *user* memory. The pointer must lie
-/// entirely within the user region — the kernel will not read arbitrary
-/// addresses on the user's behalf.
+/// write(ptr, len): prints bytes from *user* memory.
+///
+/// The buffer must lie entirely within the running process's region. Without
+/// this check a user program could hand the kernel any address and have it
+/// read kernel memory aloud — the classic confused-deputy bug.
 fn sys_write(ptr: u64, len: u64) -> u64 {
     const MAX_WRITE: u64 = 4096;
     if len > MAX_WRITE {
@@ -213,7 +162,7 @@ fn sys_write(ptr: u64, len: u64) -> u64 {
     let Some(end) = ptr.checked_add(len) else {
         return u64::MAX;
     };
-    if ptr < USER_CODE_START || end > USER_STACK_TOP {
+    if ptr < RANGE_START.load(Ordering::SeqCst) || end > RANGE_END.load(Ordering::SeqCst) {
         return u64::MAX;
     }
     for i in 0..len {

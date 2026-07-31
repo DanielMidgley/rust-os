@@ -16,23 +16,30 @@ available commands:
   sleep <ms>    pause for <ms> milliseconds
   spawn         start a busy-loop kernel thread
   threads       list kernel threads
-  user          run the embedded ring-3 demo program
+  exec <path>   run an ELF program in ring 3
+  ps            list processes
   ls [path]     list a directory on the disk
   cat <path>    print a file from the disk
   disk          show mounted volume info
   about         show kernel info
 keys: up/down browse history, PgUp/PgDn scroll output
-> ls
-  HELLO.TXT          33
-  README.TXT        295
-  POEM.TXT         1960
-  DOCS            <DIR>
-4 entries
-> cat hello.txt
-Hello from the FAT16 filesystem!
-> user
-Hello from ring 3! (write syscall via int 0x80)
-user program exited with code 3
+> ls /bin
+  HELLO.ELF        4168
+  RING3.ELF        4109
+  BSS.ELF          8192
+  SYSCALL.ELF      4113
+  CRASH.ELF        4103
+  EVIL.ELF         4102
+6 entries
+> exec /bin/hello.elf
+Hello from a real ELF process!
+process exited with code 0
+> exec /bin/crash.elf
+user program page fault at VirtAddr(0x0); terminating it
+process terminated by a fault
+> ps
+    1  hello.elf         exited 0
+    2  crash.elf         killed by fault
 > spawn
 spawned thread 1 (busy loop; watch `threads`)
 > threads
@@ -80,8 +87,8 @@ A real command interpreter running as an async task on the kernel's cooperative 
   so arrowing back down returns to what was being typed
 - **Screen scrollback** — PageUp/PageDown page through the last 200 lines of output; any new
   output or keystroke snaps back to the live view
-- Commands: `help`, `clear`, `echo`, `date`, `uptime`, `sleep`, `spawn`, `threads`, `user`,
-  `ls`, `cat`, `disk`, `about`
+- Commands: `help`, `clear`, `echo`, `date`, `uptime`, `sleep`, `spawn`, `threads`, `exec`,
+  `ps`, `ls`, `cat`, `disk`, `about`
 
 ### PIT-backed monotonic clock and async `sleep`
 
@@ -143,10 +150,31 @@ kernel/userspace boundary that everything else in an OS is built around.
   (or a fault) restores it as if the call had returned, carrying the exit code
 - **Fault containment**: a page fault or GPF from ring 3 kills the user program and returns to
   the shell — a crashing user program cannot take the kernel down
-- No ELF loader yet, so the demo program is hand-written assembly embedded in the kernel and
-  copied into user pages; it exits with its own CPL, and an integration test asserts the exit
-  code is 3 — proof it ran in ring 3
 - Preemption keeps working while user code runs: kernel threads and ring 3 interleave
+
+### Processes: ELF loading and per-process address spaces
+
+Real executables, read off the disk and run in isolation — the point where the pieces become
+an operating system rather than a collection of subsystems.
+
+- **ELF64 loader** — validates the header and machine type, walks the program headers, and maps
+  each `PT_LOAD` segment at its virtual address with per-segment permissions
+- `.bss` support: memory beyond a segment's file size is zero-filled, because every frame is
+  zeroed at map time
+- **A fresh page table per process.** The kernel's entries are copied in (so interrupts arriving
+  during user code still find the IDT, handlers, and kernel stacks), while one reserved P4 slot
+  holds the process's private mappings. Two processes cannot see each other's memory
+- **Address spaces are torn down on exit** — the private subtree is walked and every frame
+  returned to a free list, so processes can be run indefinitely without leaking (a test runs 40
+  in a row)
+- **Loader-level security**: a segment asking to be mapped outside the user region is rejected
+  before a single frame is allocated, so a crafted ELF cannot ask to be loaded over the kernel
+- **Fault containment**: a process that dereferences null is killed; the kernel keeps running
+  and the next `exec` works
+- Programs are built by [`tools/mkelf.py`](tools/mkelf.py) and live in `/bin` on the FAT volume;
+  each encodes its result in its exit code so `tests/process.rs` can assert on it — `ring3.elf`
+  exits with `cs & 3`, which is 3 only if it genuinely ran in ring 3
+- Shell: `exec <path>`, `ps`
 
 ### Filesystem: ATA disk driver + FAT16
 
@@ -247,11 +275,28 @@ who actually contends," not "disable interrupts everywhere."
 
 **The page-table flag everyone forgets.** Mapping a user page `USER_ACCESSIBLE` isn't enough:
 every parent level of the page-table walk (P4 → P3 → P2) must carry the flag too, or the CPU
-faults the walk at that level. The mapping API only applies flags to tables it *creates* — the
-bootloader's pre-existing entries for the low address space had to be widened by hand. The
-resulting debug session (user rip faulting on a read of address `0x30`) also surfaced a classic
-Intel-syntax assembler trap: `mov rsi, symbol` assembles as a *load from* that address, not the
-constant — it needs `offset`.
+faults the walk at that level. The mapping API only applies flags to tables it *creates*, so
+when user pages lived in the kernel's own address space the bootloader's pre-existing entries
+had to be widened by hand. Per-process page tables later made that unnecessary — every table on
+a process's path is now created by the loader — but the rule is the same, just satisfied by
+construction. The debugging session behind it (user rip faulting on a read of address `0x30`)
+also surfaced a classic Intel-syntax assembler trap: `mov rsi, symbol` assembles as a *load
+from* that address, not the constant — it needs `offset`.
+
+**Two ways to get a rip-relative displacement wrong.** The hand-assembled user programs are
+built by a small Python assembler, and `mov byte [rip + flag], 5` initially wrote to the byte
+*after* `flag`. rip means "address of the next instruction", and this encoding puts an immediate
+*after* the displacement field — so those trailing bytes count toward the distance. Caught by
+disassembling the generated ELF with `llvm-objdump` and noticing that the load and the store
+named addresses one apart. Verifying generated machine code against a real disassembler costs
+minutes; debugging a one-byte-off store inside ring 3 does not.
+
+**Sharing a kernel between address spaces.** Every process page table starts as a copy of the
+kernel's, because an interrupt can arrive at any instruction of user code and the handler must
+find the IDT, its own code, and a stack at their usual addresses. Copying only a "higher half"
+would not do here: this kernel's image, physical map, and heap sit in scattered P4 slots. The
+flip side is teardown — freeing an address space must walk *only* the process's private slot,
+since every other entry points at live kernel tables shared with everyone else.
 
 **Context switching from inside an interrupt handler.** Three ordering rules make preemption
 sound: the PIC gets its end-of-interrupt *before* the switch (the next thread runs with the old
@@ -283,7 +328,9 @@ src/
 ├── usermode.rs       # ring 3: user page mapping, syscall dispatch, run/exit
 ├── usermode.s        # syscall entry stub, iretq entry/exit, demo program
 ├── ata.rs            # ATA PIO disk driver (polling, LBA28)
-└── fat.rs            # read-only FAT16: BPB, directories, cluster chains
+├── fat.rs            # read-only FAT16: BPB, directories, cluster chains
+├── elf.rs            # ELF64 parsing and validation
+└── process.rs        # address spaces, ELF loading, process table
 └── task/
     ├── mod.rs            # task abstraction
     ├── executor.rs       # waker-based cooperative executor
@@ -292,6 +339,7 @@ src/
     └── shell.rs          # interactive shell
 tests/                # integration tests, each booted in QEMU
 tools/mkfatimg.py     # builds disk.img, the FAT16 volume the kernel mounts
+tools/mkelf.py        # assembles the ring-3 ELF programs that land in /bin
 x86_64-rust-os.json   # custom bare-metal target specification
 ```
 
@@ -344,7 +392,7 @@ Planned work, roughly in order of ambition:
       switching, moving past the current cooperative model
 - [x] **User mode (ring 3) and system calls**
 - [x] **A filesystem** — ATA block driver plus FAT16
-- [ ] **ELF loader and real processes**
+- [x] **ELF loader and real processes** — per-process address spaces, programs loaded from disk
 - [ ] Networking — NIC driver and a minimal TCP/IP stack
 
 ---

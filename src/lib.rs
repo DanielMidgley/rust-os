@@ -19,6 +19,8 @@ pub mod clock;
 pub mod usermode;
 pub mod ata;
 pub mod fat;
+pub mod elf;
+pub mod process;
 
 extern crate alloc;
 

@@ -7,7 +7,7 @@ use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
 
 use crate::task::keyboard::ScancodeStream;
-use crate::{clock, fat, print, println, threads, time, usermode, vga_buffer};
+use crate::{clock, fat, print, println, process, threads, time, usermode, vga_buffer};
 
 const PROMPT: &str = "> ";
 const HISTORY_CAP: usize = 50;
@@ -107,6 +107,20 @@ fn describe(err: fat::FsError) -> &'static str {
     }
 }
 
+/// Human-readable process/loader errors.
+fn describe_proc(err: process::ProcError) -> &'static str {
+    match err {
+        process::ProcError::Busy => "a program is already running",
+        process::ProcError::Fs(inner) => describe(inner),
+        process::ProcError::Elf(_) => "not a usable x86-64 ELF executable",
+        process::ProcError::OutOfMemory => "out of memory",
+        process::ProcError::SegmentOutOfRange => "segment outside the user region (rejected)",
+        process::ProcError::SegmentOverlapsStack => "segment collides with the user stack",
+        process::ProcError::ImageTooLarge => "image too large",
+        process::ProcError::BadEntryPoint => "entry point is not in an executable segment",
+    }
+}
+
 /// Swaps the displayed input line for `new`, erasing the old one on screen.
 fn replace_line(line: &mut String, new: String) {
     for _ in 0..line.chars().count() {
@@ -198,7 +212,8 @@ async fn execute(line: &str) {
             println!("  sleep <ms>    pause for <ms> milliseconds");
             println!("  spawn         start a busy-loop kernel thread");
             println!("  threads       list kernel threads");
-            println!("  user          run the embedded ring-3 demo program");
+            println!("  exec <path>   run an ELF program in ring 3");
+            println!("  ps            list processes");
             println!("  ls [path]     list a directory on the disk");
             println!("  cat <path>    print a file from the disk");
             println!("  disk          show mounted volume info");
@@ -249,13 +264,36 @@ async fn execute(line: &str) {
             }
             println!("work counter: {}", WORK_COUNTER.load(Ordering::Relaxed));
         }
-        "user" => match usermode::run_user_program() {
-            Ok(usermode::FAULT_EXIT_CODE) => {
-                println!("user program was terminated by a fault");
-            }
-            Ok(code) => println!("user program exited with code {}", code),
-            Err(err) => println!("user: {}", err),
+        "exec" => match argument(line) {
+            None => println!("usage: exec <path>   (try /bin/hello.elf)"),
+            Some(path) => match process::exec(path) {
+                Ok(usermode::FAULT_EXIT_CODE) => {
+                    println!("process terminated by a fault");
+                }
+                Ok(code) => println!("process exited with code {}", code),
+                Err(err) => println!("exec: {}", describe_proc(err)),
+            },
         },
+        "ps" => {
+            let mut buf = [None; process::MAX_PROCESSES];
+            let count = process::snapshot(&mut buf);
+            if count == 0 {
+                println!("no processes have run yet");
+            }
+            for entry in buf.iter().take(count).flatten() {
+                match entry.state {
+                    process::State::Running => {
+                        println!("  {:>3}  {:<16}  running", entry.pid, entry.name())
+                    }
+                    process::State::Exited(usermode::FAULT_EXIT_CODE) => {
+                        println!("  {:>3}  {:<16}  killed by fault", entry.pid, entry.name())
+                    }
+                    process::State::Exited(code) => {
+                        println!("  {:>3}  {:<16}  exited {}", entry.pid, entry.name(), code)
+                    }
+                }
+            }
+        }
         "ls" => {
             let path = argument(line).unwrap_or("/");
             match fat::list(path, |name, is_dir, size| {

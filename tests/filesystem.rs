@@ -68,8 +68,9 @@ fn lists_the_root_directory() {
 
     assert!(seen_hello, "HELLO.TXT missing from the root directory");
     assert!(seen_docs_dir, "DOCS/ missing from the root directory");
-    // HELLO.TXT, README.TXT, POEM.TXT, DOCS -- the volume label is not an entry.
-    assert_eq!(count, 4);
+    // HELLO.TXT, README.TXT, POEM.TXT, DOCS, BIN -- the volume label is not
+    // a directory entry.
+    assert_eq!(count, 5);
 }
 
 #[test_case]
