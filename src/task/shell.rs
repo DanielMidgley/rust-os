@@ -1,15 +1,28 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
 
 use crate::task::keyboard::ScancodeStream;
-use crate::{clock, print, println, time, vga_buffer};
+use crate::{clock, print, println, threads, time, vga_buffer};
 
 const PROMPT: &str = "> ";
 const HISTORY_CAP: usize = 50;
+
+/// Shared work counter for `spawn`ed demo threads, read by `threads`.
+static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Demo workload: a thread that never yields. It only makes progress because
+/// the timer preempts whoever else is running — watching this counter climb
+/// while the shell stays responsive is the whole point.
+fn busy_worker() {
+    for _ in 0..500_000_000u64 {
+        WORK_COUNTER.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// Past commands, browsable with the up/down arrow keys.
 struct History {
@@ -165,6 +178,8 @@ async fn execute(line: &str) {
             println!("  date          show the current date and time (UTC)");
             println!("  uptime        show time since boot");
             println!("  sleep <ms>    pause for <ms> milliseconds");
+            println!("  spawn         start a busy-loop kernel thread");
+            println!("  threads       list kernel threads");
             println!("  about         show kernel info");
             println!("keys: up/down browse history, PgUp/PgDn scroll output");
         }
@@ -192,6 +207,25 @@ async fn execute(line: &str) {
                 }
                 Err(_) => println!("usage: sleep <milliseconds>"),
             }
+        }
+        "spawn" => match threads::spawn(busy_worker) {
+            Ok(id) => println!("spawned thread {} (busy loop; watch `threads`)", id),
+            Err(err) => println!("spawn failed: {:?}", err),
+        },
+        "threads" => {
+            let mut buf = [None; threads::MAX_THREADS];
+            let count = threads::snapshot(&mut buf);
+            for entry in buf.iter().take(count) {
+                if let Some((id, state)) = entry {
+                    let label = match state {
+                        threads::State::Running => "running (shell/executor)",
+                        threads::State::Ready => "ready",
+                        threads::State::Finished => "finished (awaiting reap)",
+                    };
+                    println!("  {:>2}  {}", id, label);
+                }
+            }
+            println!("work counter: {}", WORK_COUNTER.load(Ordering::Relaxed));
         }
         "about" => {
             println!(

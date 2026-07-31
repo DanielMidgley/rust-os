@@ -14,8 +14,16 @@ available commands:
   date          show the current date and time (UTC)
   uptime        show time since boot
   sleep <ms>    pause for <ms> milliseconds
+  spawn         start a busy-loop kernel thread
+  threads       list kernel threads
   about         show kernel info
 keys: up/down browse history, PgUp/PgDn scroll output
+> spawn
+spawned thread 1 (busy loop; watch `threads`)
+> threads
+   0  running (shell/executor)
+   1  ready
+work counter: 30761266
 > date
 2026-07-19 14:33:07 UTC
 > uptime
@@ -57,7 +65,7 @@ A real command interpreter running as an async task on the kernel's cooperative 
   so arrowing back down returns to what was being typed
 - **Screen scrollback** — PageUp/PageDown page through the last 200 lines of output; any new
   output or keystroke snaps back to the live view
-- Commands: `help`, `clear`, `echo`, `date`, `uptime`, `sleep`, `about`
+- Commands: `help`, `clear`, `echo`, `date`, `uptime`, `sleep`, `spawn`, `threads`, `about`
 
 ### PIT-backed monotonic clock and async `sleep`
 
@@ -85,6 +93,23 @@ spinning on RTC update flags.
 - Unix-seconds ↔ civil-date conversion via Howard Hinnant's `days_from_civil` /
   `civil_from_days` algorithms, handling leap years correctly across century boundaries
 - Calendar math covered by in-kernel unit tests (epoch, leap day, year boundary, known timestamps)
+
+### Preemptive multitasking
+
+Kernel threads with their own stacks, switched by the timer interrupt — the leap from "tasks
+politely take turns" to "the kernel decides who runs."
+
+- **Hand-written context switch** in a dedicated assembly file (`threads.s`): callee-saved
+  registers pushed, stack pointers swapped, execution resumes mid-function in another thread
+- **Round-robin scheduling** on every PIT tick (10 ms quantum); a thread that never yields
+  still can't monopolise the CPU
+- New threads bootstrapped by hand-crafting their initial stack frame so the first context
+  switch "returns" into a trampoline that enables interrupts and calls the entry function
+- The boot flow (and the async executor with the shell) runs on as thread 0 — cooperative
+  async tasks *within* a thread, preemptive threads around them
+- **Proven by an integration test**: a busy-loop thread that never yields, watched by a main
+  flow that never yields either — only timer preemption can interleave them (`tests/preemption.rs`)
+- Shell: `spawn` starts a busy worker; `threads` lists thread states live
 
 ### VGA text driver improvements
 
@@ -145,6 +170,14 @@ plausible-looking but wrong timestamps:
 **Bounded hardware waits.** Every spin loop against hardware has an iteration ceiling, so a
 misbehaving or absent device degrades instead of hanging the kernel.
 
+**Context switching from inside an interrupt handler.** Three ordering rules make preemption
+sound: the PIC gets its end-of-interrupt *before* the switch (the next thread runs with the old
+thread's interrupt frame still parked on its stack — an unacknowledged PIC would silently stop
+all future preemption); the scheduler lock is released *before* the switch (or the next thread
+deadlocks on its first `spawn`); and the scheduler never touches the heap in interrupt context —
+its run queue and finished-thread list are fixed-capacity, and dead threads' stacks are freed
+later, from thread context, because a thread can't free the stack it's standing on.
+
 ---
 
 ## Layout
@@ -162,6 +195,8 @@ src/
 ├── time.rs           # PIT clock, tick counter, async sleep
 ├── rtc.rs            # CMOS real-time clock driver
 ├── clock.rs          # kernel wall clock: RTC-seeded, PIT-advanced
+├── threads.rs        # preemptive kernel threads: scheduler, spawn/exit/reap
+├── threads.s         # context switch + thread entry trampoline (assembly)
 └── task/
     ├── mod.rs            # task abstraction
     ├── executor.rs       # waker-based cooperative executor
@@ -208,7 +243,7 @@ Planned work, roughly in order of ambition:
 
 - [x] Command history and scrollback in the shell
 - [x] Kernel-maintained clock (seed from the RTC once at boot, advance with PIT ticks)
-- [ ] **Preemptive multitasking** — kernel threads with separate stacks and timer-driven context
+- [x] **Preemptive multitasking** — kernel threads with separate stacks and timer-driven context
       switching, moving past the current cooperative model
 - [ ] **User mode (ring 3) and system calls**
 - [ ] **A filesystem** — ATA/virtio block driver plus FAT

@@ -29,6 +29,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
 
+    rust_os::threads::init(); // needs the heap; adopts this flow as thread 0
+
     #[cfg(test)]
     test_main();
 
